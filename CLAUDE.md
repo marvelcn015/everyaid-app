@@ -15,13 +15,19 @@ yarn start    # Start production server
 This is a Next.js 14 App Router application for live stream tipping using Yellow Network state channels.
 
 ### Core Stack
-- **Next.js 14** with App Router (client components)
+- **Next.js 14** with App Router (almost all components are client-side via `'use client'`)
 - **wagmi + RainbowKit** for wallet connection (supports mainnet, Optimism, Arbitrum, Base, Polygon)
 - **viem** for Ethereum client operations
 - **@erc7824/nitrolite** for state channel operations via Yellow Network
 - **Supabase** for database (JSONB document store), authentication, and storage
 - **TailwindCSS** with custom dark theme
 - **swagger-ui-react** for API documentation at `/api-docs`
+
+### Conventions
+- Path alias: `@/*` maps to the project root (configured in `tsconfig.json`)
+- Wallet addresses are always normalized to lowercase before DB queries
+- Nitrolite hooks use `// @ts-nocheck` due to SDK typing gaps — be aware when modifying `/lib/nitrolite/`
+- IDs: wallet address for users, `crypto.randomUUID()` for streams and tips
 
 ### Key Directories
 - `/app` - Next.js pages (landing, browse, host, stream, api-docs) and providers. Root (`/`) redirects to `/landing`
@@ -36,11 +42,11 @@ This is a Next.js 14 App Router application for live stream tipping using Yellow
 ### Database (Supabase JSONB Document Store)
 Single `documents` table with JSONB `data` column, acting as a NoSQL-style document store:
 
-| Collection | `id` | `data` fields |
-|---|---|---|
-| `users` | wallet_address | `display_name`, `avatar_url` |
-| `streams` | uuid | `streamer_wallet`, `title`, `status` (live/ended), `started_at`, `ended_at` |
-| `tips` | uuid | `stream_id`, `from_address`, `to_address`, `token`, `amount`, `memo`, `tx_type`, `clearnode_tx_id` |
+| Collection | `id`           | `data` fields                                                                                      |
+| ---------- | -------------- | -------------------------------------------------------------------------------------------------- |
+| `users`    | wallet_address | `display_name`, `avatar_url`                                                                       |
+| `streams`  | uuid           | `streamer_wallet`, `title`, `status` (live/ended), `started_at`, `ended_at`                        |
+| `tips`     | uuid           | `stream_id`, `from_address`, `to_address`, `token`, `amount`, `memo`, `tx_type`, `clearnode_tx_id` |
 
 Query patterns: `eq('collection', 'users')`, `eq('data->>field', value)`, GIN index on `data`.
 

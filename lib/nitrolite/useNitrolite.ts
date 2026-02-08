@@ -14,13 +14,12 @@ import {
   createTransferMessage,
   createCloseChannelMessage,
   createEIP712AuthMessageSigner,
-  createAuthVerifyMessageFromChallenge,
+  parseAuthChallengeResponse,
   parseBalanceUpdateResponse,
   BalanceUpdateResponse,
   NitroliteClient,
   WalletStateSigner,
   parseAnyRPCResponse,
-  createGetChannelsMessage,
   createGetChannelsMessageV2,
   createGetAssetsMessageV2,
   RPCBalance,
@@ -36,15 +35,7 @@ import {
   CLEARNODE_WS,
   CUSTODY_CONTRACT,
 } from "./config";
-import type { NitroliteStatus, WsInbound, WsOutbound } from "./types";
-
-function safeJsonParse(data: string): any {
-  try {
-    return JSON.parse(data);
-  } catch {
-    return null;
-  }
-}
+import type { NitroliteStatus } from "./types";
 
 export function useNitrolite() {
   const { address, isConnected } = useAccount();
@@ -56,6 +47,7 @@ export function useNitrolite() {
   const [status, setStatus] = useState<NitroliteStatus>("idle");
   const [lastError, setLastError] = useState<string | null>(null);
   const [challenge, setChallenge] = useState<any>(null);
+  const [challengeRaw, setChallengeRaw] = useState<string | null>(null);
   const [sessionKey, setSessionKey] = useState<`0x${string}` | null>(null);
   const [authParams, setAuthParams] = useState<{
     session_key: `0x${string}`;
@@ -70,6 +62,7 @@ export function useNitrolite() {
   const [ytestUsdToken, setYtestUsdToken] = useState<`0x${string}` | null>(
     null,
   );
+  const [assets, setAssets] = useState<RPCAsset[]>([]);
   const [channelData, setChannelData] = useState<{
     channel: any;
     unsignedInitialState: any;
@@ -97,7 +90,7 @@ export function useNitrolite() {
       !walletClient.chain
     )
       return null;
-    const wc = walletClient as any; // 忽略類型檢查
+    const wc = walletClient as any; // bypass type checking
     const config = {
       publicClient: publicClient as PublicClient,
       walletClient: wc,
@@ -107,7 +100,7 @@ export function useNitrolite() {
         adjudicator: ADJUDICATOR_CONTRACT,
       },
       chainId: CHAIN_ID,
-      // challengeDuration: 3600n, // 1 hour minimum FIXME: build error (BigInt literals are not available when targeting lower than ES2020)
+      challengeDuration: BigInt(3600),
     };
     return {
       publicClient: publicClient as PublicClient,
@@ -122,17 +115,10 @@ export function useNitrolite() {
     };
   }, [walletClient, publicClient]);
 
-  const send = useCallback((msg: WsOutbound) => {
-    const ws = wsRef.current;
-    if (!ws || ws.readyState !== WebSocket.OPEN)
-      throw new Error("WebSocket is not open");
-    ws.send(JSON.stringify(msg));
-  }, []);
-
   const connectWs = useCallback(() => {
     if (!canWork) throw new Error("Wallet not ready");
 
-    // 總是關閉現有連接並重置狀態
+    // Always close existing connection and reset state
     if (wsRef.current) {
       wsRef.current.close();
       wsRef.current = null;
@@ -166,12 +152,13 @@ export function useNitrolite() {
         const rpcResponse = parseAnyRPCResponse(String(evt.data));
         console.log("Parsed RPC Response:", rpcResponse);
 
-        // 一開始連線會取得資產列表，找出 ytest.usd 的 token address 並存起來
+        // Store full asset list and find ytest.usd token address
         if (rpcResponse.method === RPCMethod.Assets) {
-          const assets: RPCAsset[] = rpcResponse.params.assets;
+          const assetList: RPCAsset[] = rpcResponse.params.assets;
+          setAssets(assetList);
 
-          // 找出 ytest.usd: chainId=11155111 或 59141, symbol=ytest.usd, decimals=6
-          const ytestAsset = assets.find(
+          // Find ytest.usd: chainId=11155111 or 59141, symbol=ytest.usd, decimals=6
+          const ytestAsset = assetList.find(
             (asset) =>
               (asset.chainId === 11155111 || asset.chainId === 59141) &&
               asset.symbol === "ytest.usd" &&
@@ -191,28 +178,38 @@ export function useNitrolite() {
 
         if (rpcResponse.method === RPCMethod.AuthChallenge) {
           console.log("Received auth challenge:", rpcResponse.params);
-          const challengeMessage = rpcResponse.params.challengeMessage;
-          console.log("Challenge message for signing:", challengeMessage);
-          setChallenge(challengeMessage);
+          setChallenge(rpcResponse.params);
+          setChallengeRaw(String(evt.data));
           setStatus("auth_challenged");
           return;
         }
 
-        // 處理特定訊息
+        // Handle auth verification response
+        if (rpcResponse.method === RPCMethod.AuthVerify) {
+          if (rpcResponse.params.success) {
+            setStatus("auth_verified");
+          } else {
+            setStatus("error");
+            setLastError("Auth verification failed");
+          }
+          return;
+        }
+
+        // Handle specific messages
         if (rpcResponse.method === RPCMethod.BalanceUpdate) {
           let data: BalanceUpdateResponse = parseBalanceUpdateResponse(
             evt.data,
           );
           console.log("Balance update data:", data.params.balanceUpdates);
           const balanceUpdates: RPCBalance[] = data.params.balanceUpdates;
-          // 找出 ytest.usd
+          // Find ytest.usd balance
           const ytestUpdate = balanceUpdates.find(
             (update) => update.asset === "ytest.usd",
           );
           if (ytestUpdate) {
             setYtestUsdBalance(ytestUpdate.amount);
           }
-          // 可以添加狀態來存儲 balance updates
+          // Additional balance updates can be stored here
         }
 
         if (rpcResponse.method === RPCMethod.CreateChannel) {
@@ -236,7 +233,7 @@ export function useNitrolite() {
 
         if (rpcResponse.method === RPCMethod.GetChannels) {
           console.log("GetChannels response:", rpcResponse.params);
-          // 可以在這裡處理頻道列表，例如存到狀態中
+          // Channel list can be stored in state here
         }
 
         if (rpcResponse.method === RPCMethod.ResizeChannel) {
@@ -248,7 +245,7 @@ export function useNitrolite() {
 
         if (rpcResponse.method === RPCMethod.Transfer) {
           console.log("Transfer response:", rpcResponse.params);
-          // 假設響應包含成功信息
+          // Transfer completed successfully
           setStatus("transferred");
         }
 
@@ -278,7 +275,7 @@ export function useNitrolite() {
     setLastError(null);
   }, []);
 
-  // 自訂 auth request
+  // Send auth request
   const sendAuthRequest = useCallback(
     async (params: {
       application: string;
@@ -291,7 +288,7 @@ export function useNitrolite() {
       if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN)
         throw new Error("WS not connected");
 
-      // 生成臨時 session key
+      // Generate temporary session key
       const sessionPrivateKeyTemp = generatePrivateKey();
       const sessionSignerTemp = createECDSAMessageSigner(sessionPrivateKeyTemp);
       const sessionAccount = privateKeyToAccount(sessionPrivateKeyTemp);
@@ -323,54 +320,24 @@ export function useNitrolite() {
   const verifyAuth = useCallback(async () => {
     if (!canWork || !address || !walletClient || !nitroliteDeps)
       throw new Error("Wallet not ready");
-    if (!challenge || !authParams)
+    if (!challengeRaw || !authParams)
       throw new Error("No challenge or auth params");
 
-    const signer = createEIP712AuthMessageSigner(walletClient, authParams, {
-      name: "Test app",
-    });
-    const verifyMsg = await createAuthVerifyMessageFromChallenge(
-      signer,
-      challenge,
+    const challengeResponse = parseAuthChallengeResponse(challengeRaw);
+
+    const signer = createEIP712AuthMessageSigner(
+      walletClient as any,
+      authParams,
+      { name: "tipping-live-app" },
     );
 
+    const verifyMsg = await createAuthVerifyMessage(signer, challengeResponse);
+
     wsRef.current!.send(verifyMsg);
-    setStatus("auth_verified");
-  }, [address, canWork, challenge, nitroliteDeps, authParams, walletClient]);
+    // Status will be set by the AuthVerify response handler
+  }, [address, canWork, challengeRaw, nitroliteDeps, authParams, walletClient]);
 
-  // 3) Send tip (先做示範 payload)
-  const sendTip = useCallback(
-    async (params: {
-      streamId: string;
-      streamer: `0x${string}`;
-      token: `0x${string}`; // ERC20 address or pseudo for native
-      amount: string; // decimal string (你可換成 bigint/wei)
-      memo?: string;
-    }) => {
-      if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN)
-        throw new Error("WS not connected");
-      if (!address) throw new Error("No wallet");
-
-      // 先用自訂 method：你之後替換成 nitrolite 的 transfer/payment message builder
-      const msg: WsOutbound = {
-        method: "tip_request",
-        params: {
-          from: address,
-          to: params.streamer,
-          streamId: params.streamId,
-          token: params.token,
-          amount: params.amount,
-          memo: params.memo || "",
-          ts: Date.now(),
-        },
-      };
-
-      send(msg);
-    },
-    [address, send],
-  );
-
-  // 3) Create channel
+  // Create channel
   const createChannel = useCallback(async () => {
     if (
       !sessionPrivateKey ||
@@ -379,11 +346,11 @@ export function useNitrolite() {
     )
       throw new Error("Session not ready");
 
-    // 使用 ytest.usd token，如果沒有則使用原生 ETH
+    // Use ytest.usd token, fallback to native ETH
     const tokenToUse =
       ytestUsdToken || "0x0000000000000000000000000000000000000000";
 
-    // 創建 message signer
+    // Create message signer
     const messageSigner = createECDSAMessageSigner(sessionPrivateKey);
 
     const createChannelMsg = await createCreateChannelMessage(messageSigner, {
@@ -523,7 +490,7 @@ export function useNitrolite() {
     wsRef.current.send(msg);
   }, []);
 
-  // 自動清理
+  // Auto-cleanup on unmount
   useEffect(() => {
     return () => disconnectWs();
   }, [disconnectWs]);
@@ -535,6 +502,7 @@ export function useNitrolite() {
     sessionKey,
     challenge,
     authParams,
+    assets,
     ytestUsdBalance,
     ytestUsdToken,
     channelId: channelData?.channelId || null,
@@ -551,7 +519,5 @@ export function useNitrolite() {
     closeChannel,
     getChannels,
     getAssets,
-
-    sendTip,
   };
 }

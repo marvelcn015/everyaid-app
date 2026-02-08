@@ -56,9 +56,34 @@ export async function POST(request: NextRequest) {
       )
     }
 
-    const id = crypto.randomUUID()
+    // Validate amount is a valid numeric string
+    if (isNaN(parseFloat(amount)) || parseFloat(amount) <= 0) {
+      return NextResponse.json(
+        { error: 'amount must be a positive numeric value' },
+        { status: 400 }
+      )
+    }
 
     const supabase = await createClient()
+
+    // Duplicate check: if clearnode_tx_id is provided, check for existing record
+    if (clearnode_tx_id) {
+      const { data: existing } = await supabase
+        .from('documents')
+        .select('*')
+        .eq('collection', COLLECTION)
+        .eq('data->>clearnode_tx_id', clearnode_tx_id)
+        .maybeSingle()
+
+      if (existing) {
+        return NextResponse.json({
+          tip: { id: existing.id, ...(existing.data as Record<string, unknown>), created_at: existing.created_at },
+        })
+      }
+    }
+
+    const id = crypto.randomUUID()
+
     const { data, error } = await supabase
       .from('documents')
       .insert({

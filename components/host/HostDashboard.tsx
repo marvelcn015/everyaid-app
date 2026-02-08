@@ -75,12 +75,12 @@ export default function HostDashboard({ stream, wallet, onEndStream, isEnding }:
             to_address: String(tx.toAccount),
             token: tx.asset,
             amount: tx.amount,
-            memo: '',
+            memo: (tx as any).memo || '',
             tx_type: tx.txType,
             clearnode_tx_id: tx.id,
           }),
         })
-      } catch { /* best-effort persistence */ }
+      } catch (err) { console.error('Failed to persist tip:', err) }
     }
   }, [stream.id])
 

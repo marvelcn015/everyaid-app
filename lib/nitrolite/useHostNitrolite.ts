@@ -1,4 +1,3 @@
-// @ts-nocheck
 'use client'
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
@@ -8,6 +7,8 @@ import type { PublicClient, WalletClient } from 'viem'
 import {
   createAuthRequestMessage,
   createAuthVerifyMessage,
+  createEIP712AuthMessageSigner,
+  parseAuthChallengeResponse,
   WalletStateSigner,
   parseAnyRPCResponse,
   RPCMethod,
@@ -27,12 +28,19 @@ export function useHostNitrolite() {
 
   const wsRef = useRef<WebSocket | null>(null)
   const onTipReceivedRef = useRef<TipReceivedCallback | null>(null)
+  const challengeRawRef = useRef<string | null>(null)
 
   const [status, setStatus] = useState<NitroliteStatus>('idle')
   const [lastError, setLastError] = useState<string | null>(null)
   const [challenge, setChallenge] = useState<unknown>(null)
   const [sessionKey, setSessionKey] = useState<`0x${string}` | null>(null)
   const [tips, setTips] = useState<RPCTransaction[]>([])
+  const [authParams, setAuthParams] = useState<{
+    session_key: `0x${string}`
+    allowances: Array<{ asset: string; amount: string }>
+    expires_at: bigint
+    scope: string
+  } | null>(null)
 
   const canWork = Boolean(isConnected && address && walletClient && publicClient)
 
@@ -41,17 +49,11 @@ export function useHostNitrolite() {
     return {
       publicClient: publicClient as PublicClient,
       walletClient: walletClient as WalletClient,
-      stateSigner: new WalletStateSigner(walletClient as WalletClient),
+      stateSigner: new WalletStateSigner(walletClient as any),
       addresses: { custody: CUSTODY_CONTRACT, adjudicator: ADJUDICATOR_CONTRACT },
       chainId: CHAIN_ID,
     }
   }, [walletClient, publicClient])
-
-  const send = useCallback((msg: unknown) => {
-    const ws = wsRef.current
-    if (!ws || ws.readyState !== WebSocket.OPEN) throw new Error('WebSocket is not open')
-    ws.send(JSON.stringify(msg))
-  }, [])
 
   const setOnTipReceived = useCallback((cb: TipReceivedCallback) => {
     onTipReceivedRef.current = cb
@@ -62,19 +64,21 @@ export function useHostNitrolite() {
     try {
       parsed = parseAnyRPCResponse(raw)
     } catch {
-      // Not a valid RPC response, ignore
       return
     }
 
+    console.log('Host RPC:', parsed.method, parsed.params)
+
     switch (parsed.method) {
       case RPCMethod.AuthChallenge: {
+        challengeRawRef.current = raw
         setChallenge(parsed.params)
         setStatus('auth_challenged')
         break
       }
 
       case RPCMethod.AuthVerify: {
-        if (parsed.params.success) {
+        if ((parsed.params as any).success) {
           setStatus('auth_verified')
         } else {
           setStatus('error')
@@ -84,8 +88,8 @@ export function useHostNitrolite() {
       }
 
       case RPCMethod.TransferNotification: {
-        const txs = parsed.params.transactions
-        if (txs.length > 0) {
+        const txs = (parsed.params as any).transactions
+        if (txs && txs.length > 0) {
           setTips((prev) => [...txs, ...prev])
           onTipReceivedRef.current?.(txs)
         }
@@ -93,7 +97,8 @@ export function useHostNitrolite() {
       }
 
       case RPCMethod.Error: {
-        setLastError(parsed.params.error)
+        console.error('Host RPC Error:', (parsed.params as any)?.error)
+        setLastError((parsed.params as any)?.error)
         break
       }
 
@@ -133,10 +138,11 @@ export function useHostNitrolite() {
     setStatus('idle')
     setChallenge(null)
     setSessionKey(null)
+    setAuthParams(null)
     setLastError(null)
   }, [])
 
-  // 1) Request auth
+  // 1) Request auth — properly await and include all required params
   const requestAuth = useCallback(async () => {
     if (!canWork || !address || !walletClient) throw new Error('Wallet not ready')
     if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) throw new Error('WS not connected')
@@ -144,38 +150,45 @@ export function useHostNitrolite() {
     const sk = address as `0x${string}`
     setSessionKey(sk)
 
-    const msg = createAuthRequestMessage({
-      address,
+    const params = {
+      address: address as `0x${string}`,
       session_key: sk,
+      application: 'tipping-live-app',
+      allowances: [{ asset: 'ytest.usd', amount: '1000' }],
+      expires_at: BigInt(Math.floor(Date.now() / 1000) + 86400),
+      scope: 'console',
+    }
+
+    setAuthParams({
+      session_key: sk,
+      allowances: params.allowances,
+      expires_at: params.expires_at,
+      scope: params.scope,
     })
+
+    const msg = await createAuthRequestMessage(params)
 
     setStatus('auth_requested')
-    send(msg)
-  }, [address, canWork, send, walletClient])
+    wsRef.current.send(msg)
+  }, [address, canWork, walletClient])
 
-  // 2) Verify auth (EIP-712 sign challenge)
+  // 2) Verify auth — use SDK's EIP712 signer + parseAuthChallengeResponse
   const verifyAuth = useCallback(async () => {
     if (!canWork || !address || !walletClient || !nitroliteDeps) throw new Error('Wallet not ready')
-    if (!challenge) throw new Error('No challenge')
+    if (!challengeRawRef.current || !authParams) throw new Error('No challenge or auth params')
 
-    const typedData = challenge as any
+    const challengeResponse = parseAuthChallengeResponse(challengeRawRef.current)
 
-    const signature = await walletClient.signTypedData({
-      account: walletClient.account!,
-      domain: typedData.domain,
-      types: typedData.types,
-      primaryType: typedData.primaryType,
-      message: typedData.message,
-    })
+    const signer = createEIP712AuthMessageSigner(
+      walletClient as any,
+      authParams,
+      { name: 'tipping-live-app' },
+    )
 
-    const verifyMsg = createAuthVerifyMessage({
-      wallet: address,
-      signature,
-    })
+    const verifyMsg = await createAuthVerifyMessage(signer, challengeResponse)
 
-    send(verifyMsg)
-    // Status will be updated when auth_verify response arrives
-  }, [address, canWork, challenge, nitroliteDeps, send, walletClient])
+    wsRef.current!.send(verifyMsg)
+  }, [address, canWork, nitroliteDeps, authParams, walletClient])
 
   // Cleanup on unmount
   useEffect(() => {

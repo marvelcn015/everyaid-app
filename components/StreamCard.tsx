@@ -11,6 +11,7 @@ interface StreamCardProps {
   streamerAddress?: string
   streamerAvatar?: string | null
   startedAt: string
+  thumbnailUrl?: string
 }
 
 function getElapsed(startedAt: string): string {
@@ -22,7 +23,7 @@ function getElapsed(startedAt: string): string {
   return `${hrs}h ${mins % 60}m ago`
 }
 
-export default function StreamCard({ id, title, streamerName, streamerAddress, streamerAvatar, startedAt }: StreamCardProps) {
+export default function StreamCard({ id, title, streamerName, streamerAddress, streamerAvatar, startedAt, thumbnailUrl }: StreamCardProps) {
   const elapsed = getElapsed(startedAt)
 
   return (
@@ -30,9 +31,15 @@ export default function StreamCard({ id, title, streamerName, streamerAddress, s
       href={`/stream?stream_id=${id}`}
       className="group block overflow-hidden rounded-2xl border border-border bg-panel shadow-panel backdrop-blur transition hover:border-border2 hover:shadow-glow"
     >
-      {/* Thumbnail placeholder */}
-      <div className="flex aspect-video items-center justify-center bg-brand-soft">
-        <span className="text-xs font-semibold tracking-widest text-muted">LIVE</span>
+      {/* Thumbnail */}
+      <div className="relative aspect-video bg-brand-soft overflow-hidden">
+        {thumbnailUrl ? (
+          <img src={thumbnailUrl} alt="" className="h-full w-full object-cover" />
+        ) : (
+          <div className="flex h-full w-full items-center justify-center">
+            <span className="text-xs font-semibold tracking-widest text-muted">LIVE</span>
+          </div>
+        )}
       </div>
 
       {/* Stream info */}
